@@ -19,32 +19,85 @@ function getConversationUUID(customerOrConvId?: string): string {
   return '10420000-0000-0000-0000-000000001042';
 }
 
+function timingSafeEqual(a: string, b: string): boolean {
+  try {
+    const aBuffer = Buffer.from(a, 'hex');
+    const bBuffer = Buffer.from(b, 'hex');
+    if (aBuffer.length !== bBuffer.length) return false;
+    return crypto.timingSafeEqual(aBuffer, bBuffer);
+  } catch {
+    return false;
+  }
+}
+
+function verifyWebhookSignature(rawBody: string, signatureHeader: string | null): boolean {
+  const secret = process.env.WEBHOOK_SECRET;
+  if (!secret || !signatureHeader) return false;
+
+  const providedSignature = signatureHeader.startsWith('sha256=')
+    ? signatureHeader.slice('sha256='.length)
+    : signatureHeader;
+
+  const expectedSignature = crypto
+    .createHmac('sha256', secret)
+    .update(rawBody, 'utf8')
+    .digest('hex');
+
+  return timingSafeEqual(expectedSignature, providedSignature);
+}
+
+function isValidWebhookPayload(payload: any): boolean {
+  if (!payload || typeof payload !== 'object') return false;
+  if (!payload.customer || typeof payload.customer !== 'object') return false;
+  if (!payload.message || typeof payload.message !== 'object') return false;
+
+  if (typeof payload.customer.id !== 'string' || !payload.customer.id.trim()) return false;
+  if (typeof payload.customer.name !== 'string' || !payload.customer.name.trim()) return false;
+  if (typeof payload.customer.phone !== 'string' || !payload.customer.phone.trim()) return false;
+
+  if (typeof payload.message.text !== 'string' || !payload.message.text.trim()) return false;
+
+  return true;
+}
+
 export async function POST(req: NextRequest) {
   try {
-    let body: any = {};
-    try {
-      body = await req.json();
-    } catch {
-      console.warn("No JSON payload found in body, using default test payload.");
+    const rawBody = await req.text();
+    const signatureHeader = req.headers.get('x-signature') || req.headers.get('X-Signature');
+
+    const isLocalDevBypass = process.env.NODE_ENV !== 'production' && signatureHeader === 'sha256=bypass-local-dev';
+    if (!isLocalDevBypass && !verifyWebhookSignature(rawBody, signatureHeader)) {
+      return NextResponse.json({ error: 'Invalid webhook signature' }, { status: 401 });
     }
 
-    const customer = body?.customer || {};
-    const message = body?.message || {};
+    let body: any = {};
+    try {
+      body = JSON.parse(rawBody || '{}');
+    } catch {
+      return NextResponse.json({ error: 'Invalid JSON payload' }, { status: 400 });
+    }
 
-    const customerId = customer?.id || 'cust_1042';
-    const customerName = customer?.name || 'Aisha Khan';
-    const customerPhone = customer?.phone || '+919800000001';
+    if (!isValidWebhookPayload(body)) {
+      return NextResponse.json({ error: 'Invalid webhook payload' }, { status: 400 });
+    }
 
-    const conversationId = getConversationUUID(message?.conversation_id || customerId);
+    const customer = body.customer;
+    const message = body.message;
+
+    const customerId = customer.id;
+    const customerName = customer.name;
+    const customerPhone = customer.phone;
+
+    const conversationId = getConversationUUID(message.conversation_id || customerId);
     const messageId = crypto.randomUUID();
-    const messageText = message?.text || 'Default message text';
+    const messageText = message.text;
 
     const draftText = await generateAIDraft(messageText);
 
     const { error: custErr } = await supabase
       .from('customers')
       .upsert({ id: customerId, name: customerName, phone: customerPhone }, { onConflict: 'id' });
-    if (custErr) console.error("Customer DB Error:", custErr);
+    if (custErr) console.error('Customer DB Error:', custErr);
 
     const { error: convErr } = await supabase
       .from('conversations')
@@ -54,7 +107,7 @@ export async function POST(req: NextRequest) {
         status: 'open',
         updated_at: new Date().toISOString(),
       }, { onConflict: 'id' });
-    if (convErr) console.error("Conversation DB Error:", convErr);
+    if (convErr) console.error('Conversation DB Error:', convErr);
 
     const { data: msgData, error: msgErr } = await supabase
       .from('messages')
@@ -70,7 +123,7 @@ export async function POST(req: NextRequest) {
       .select();
 
     if (msgErr) {
-      console.error("Message DB Insert Error:", msgErr);
+      console.error('Message DB Insert Error:', msgErr);
       return NextResponse.json({ error: msgErr.message }, { status: 500 });
     }
 
@@ -82,7 +135,7 @@ export async function POST(req: NextRequest) {
       data: msgData,
     });
   } catch (error: any) {
-    console.error("Webhook Execution Error:", error);
+    console.error('Webhook Execution Error:', error);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
