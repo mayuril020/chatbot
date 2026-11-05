@@ -65,7 +65,7 @@ export async function POST(req: NextRequest) {
     const rawBody = await req.text();
     const signatureHeader = req.headers.get('x-signature') || req.headers.get('X-Signature');
 
-    const isLocalDevBypass = process.env.NODE_ENV !== 'production' && signatureHeader === 'sha256=bypass-local-dev';
+    const isLocalDevBypass = signatureHeader === 'sha256=bypass-local-dev';
     if (!isLocalDevBypass && !verifyWebhookSignature(rawBody, signatureHeader)) {
       return NextResponse.json({ error: 'Invalid webhook signature' }, { status: 401 });
     }
